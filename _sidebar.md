@@ -17,4 +17,9 @@
   * [第五周（1月22日）](./docs/周报/第五周（1月22日）.md)
 
 * 技术文档
+  
+  * [littlefs_DESIGN_zh](./docs/技术文档/littlefs_DESIGN_zh.md)
+  * [littlefs_SPEC_zh](./docs/技术文档/littlefs_SPEC_zh.md)
   * [littlefs代码分析—lfs_util](./docs/技术文档/littlefs代码分析—lfs_util.md)
+  * [littlefs代码分析—lfs.h](./docs/技术文档/littlefs代码分析—lfs.h.md)
+  

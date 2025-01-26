@@ -179,7 +179,7 @@ static inline uint32_t lfs_tobe32(uint32_t a) {
 
 把32位整数转化为大端序。如果本来就是大端序，不做处理。如果有内置函数，调用之。
 
----
+## CRC校验值计算函数
 
 ```c
 uint32_t lfs_crc(uint32_t crc, const void *buffer, size_t size) {
