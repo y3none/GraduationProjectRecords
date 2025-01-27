@@ -15,6 +15,7 @@
   * [第三周（1月8日）](./docs/周报/第三周（1月8日）.md)
   * [第四周（1月15日）](./docs/周报/第四周（1月15日）.md)
   * [第五周（1月22日）](./docs/周报/第五周（1月22日）.md)
+  * [第六周（1月27日）](./docs/周报/第六周（1月27日）.md)
 
 * 技术文档
   
@@ -22,4 +23,4 @@
   * [littlefs_SPEC_zh](./docs/技术文档/littlefs_SPEC_zh.md)
   * [littlefs代码分析—lfs_util](./docs/技术文档/littlefs代码分析—lfs_util.md)
   * [littlefs代码分析—lfs.h](./docs/技术文档/littlefs代码分析—lfs.h.md)
-  
+  * [littlefs代码分析—lfs.c](./docs/技术文档/littlefs代码分析—lfs.c)
