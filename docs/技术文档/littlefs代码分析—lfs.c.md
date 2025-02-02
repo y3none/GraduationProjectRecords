@@ -635,3 +635,681 @@ static int lfs_bd_erase(lfs_t *lfs, lfs_block_t block) {
 ```
 
 这位更是ez，那么到此为止，所有的快函数操作函数就都看完了。总结一下，这些函数非平凡的部分其实就是在`lfs->cfg`接受的外部块设备函数的基础上，增加了读、写两个缓存块和有关的操作。
+
+---
+
+### `lfs_size_t`
+
+```c
+static inline lfs_size_t lfs_path_namelen(const char *path) {
+    return strcspn(path, "/");
+}
+```
+
+返回路径首个构成的长度（即到第一个/之前）
+
+---
+
+### `lfs_path_islast`
+
+```c
+static inline bool lfs_path_islast(const char *path) {
+    lfs_size_t namelen = lfs_path_namelen(path);
+    return path[namelen + strspn(path + namelen, "/")] == '\0';
+}
+```
+
+判断路径是不是只剩下最后一段构成
+
+---
+
+### `lfs_path_isdir`
+
+```c
+static inline bool lfs_path_isdir(const char *path) {
+    return path[lfs_path_namelen(path)] != '\0';
+}
+```
+
+通过判断是不是只有一段构成来判断是不是目录。但是这个也挺奇怪的，例如"dir/file.txt"这种文件路径，也会被判断为是目录。`littlefs`的实现不太可能犯如此低级的的错误，大概率是设计如此，并不是一般意义上的判断函数。
+
+---
+
+### `lfs_pair_swap`
+
+```c
+static inline void lfs_pair_swap(lfs_block_t pair[2]) {
+    lfs_block_t t = pair[0];
+    pair[0] = pair[1];
+    pair[1] = t;
+}
+```
+
+交换一个块对的指向
+
+---
+
+### `lfs_pair_isnull`
+
+```c
+static inline bool lfs_pair_isnull(const lfs_block_t pair[2]) {
+    return pair[0] == LFS_BLOCK_NULL || pair[1] == LFS_BLOCK_NULL;
+}
+```
+
+利用宏判断块对是否为无效块
+
+---
+
+### `lfs_pair_cmp`
+
+```c
+static inline int lfs_pair_cmp(
+        const lfs_block_t paira[2],
+        const lfs_block_t pairb[2]) {
+    return !(paira[0] == pairb[0] || paira[1] == pairb[1] ||
+             paira[0] == pairb[1] || paira[1] == pairb[0]);
+}
+```
+
+检查两个块对是否有一样的部分，注意，是没有一样的部分才返回`true`
+
+---
+
+### `lfs_pair_issync`
+
+```c
+static inline bool lfs_pair_issync(
+        const lfs_block_t paira[2],
+        const lfs_block_t pairb[2]) {
+    return (paira[0] == pairb[0] && paira[1] == pairb[1]) ||
+           (paira[0] == pairb[1] && paira[1] == pairb[0]);
+}
+```
+
+检查两个块对是否完全一致（不要求顺序）
+
+---
+
+### `lfs_pair_fromle32`
+
+```c
+static inline void lfs_pair_fromle32(lfs_block_t pair[2]) {
+    pair[0] = lfs_fromle32(pair[0]);
+    pair[1] = lfs_fromle32(pair[1]);
+}
+```
+
+将小端序块对转化为大端序（仅在大端序的机器上）。
+
+---
+
+### `lfs_pair_tole32`
+
+```c
+static inline void lfs_pair_tole32(lfs_block_t pair[2]) {
+    pair[0] = lfs_tole32(pair[0]);
+    pair[1] = lfs_tole32(pair[1]);
+}
+```
+
+将大端序块对转化为小端序
+
+---
+
+### `lfs_tag_isvalid`
+
+```c
+static inline bool lfs_tag_isvalid(lfs_tag_t tag) {
+    return !(tag & 0x80000000);
+}
+```
+
+通过看第1位是不是0检验tag是否有效
+
+---
+
+### `lfs_tag_isdelete`
+
+```c
+static inline bool lfs_tag_isdelete(lfs_tag_t tag) {
+    return ((int32_t)(tag << 22) >> 22) == -1;
+}
+```
+
+通过检验后10位的`lenth`字段是否为`0x3ff`的特殊值判断是否被删除
+
+---
+
+### `lfs_tag_type1`
+
+```c
+static inline uint16_t lfs_tag_type1(lfs_tag_t tag) {
+    return (tag & 0x70000000) >> 20;
+}
+```
+
+读取第2~4位的`type`字段掩码，确定其所在分类
+
+---
+
+### `lfs_tag_type2`
+
+```c
+static inline uint16_t lfs_tag_type2(lfs_tag_t tag) {
+    return (tag & 0x78000000) >> 20;
+}
+```
+
+读取2~5位的`type`掩码，不过这种读法并没有在[SPEC.md](./docs/技术文档/littlefs_SPEC_zh)中说明，文档中认为只有3位的掩码
+
+---
+
+### `lfs_tag_type3`
+
+```c
+static inline uint16_t lfs_tag_type2(lfs_tag_t tag) {
+    return (tag & 0x7ff00000) >> 20;
+}
+```
+
+读取2~12位的完整`type`编码
+
+---
+
+### `lfs_tag_chunk`
+
+```c
+static inline uint8_t lfs_tag_chunk(lfs_tag_t tag) {
+    return (tag & 0x0ff00000) >> 20;
+}
+```
+
+读取第5-12位块字段，`type1`+`chunk`=`type`。
+
+---
+
+### `lfs_tag_splice`
+
+```c
+static inline int8_t lfs_tag_splice(lfs_tag_t tag) {
+    return (int8_t)lfs_tag_chunk(tag);
+}
+```
+
+把`chunk`转为8字节整数。
+
+---
+
+### `lfs_tag_id`
+
+```c
+static inline uint16_t lfs_tag_id(lfs_tag_t tag) {
+    return (tag & 0x000ffc00) >> 10;
+}
+```
+
+读取第13~22位的`id`，`type`+`id`是标签的唯一标识。
+
+---
+
+### `lfs_tag_size`
+
+```c
+static inline lfs_size_t lfs_tag_size(lfs_tag_t tag) {
+    return tag & 0x000003ff;
+}
+```
+
+读取最后10位的`length`字段，注意`0x3fff`表示删除
+
+---
+
+### `lfs_tag_dsize`
+
+```c
+static inline lfs_size_t lfs_tag_dsize(lfs_tag_t tag) {
+    return sizeof(tag) + lfs_tag_size(tag + lfs_tag_isdelete(tag));
+}
+```
+
+查看标签及指向内容的长度，若被删除则为4字节，否则为4字节+`length`。
+
+---
+
+### `lfs_gstate_xor`
+
+```c
+static inline void lfs_gstate_xor(lfs_gstate_t *a, const lfs_gstate_t *b) {
+    for (int i = 0; i < 3; i++) {
+        ((uint32_t*)a)[i] ^= ((const uint32_t*)b)[i];
+    }
+}
+```
+
+对两个全局状态取异或，每个全局状态由3个32位整数构成。
+
+---
+
+### `lfs_gstate_iszero`
+
+```c
+static inline bool lfs_gstate_iszero(const lfs_gstate_t *a) {
+    for (int i = 0; i < 3; i++) {
+        if (((uint32_t*)a)[i] != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+```
+
+判断全局状态是否全为0
+
+---
+
+### `lfs_gstate_hasorphans`
+
+```c
+static inline bool lfs_gstate_hasorphans(const lfs_gstate_t *a) {
+    return lfs_tag_size(a->tag);
+}
+```
+
+在全局状态标签中，`tag`的`size`即表示当前孤儿节点的数量，
+
+---
+
+### `lfs_gstate_getorphans`
+
+```c
+static inline uint8_t lfs_gstate_getorphans(const lfs_gstate_t *a) {
+    return lfs_tag_size(a->tag) & 0x1ff;
+}
+```
+
+获取孤儿节点的数量，当然问题很明显，为什么不是和10位1取与而是和后9位，似乎是因为倒数第10位是用于标记是否涉及超级快
+
+---
+
+### `lfs_gstate_hasmove`
+
+```c
+static inline bool lfs_gstate_hasmove(const lfs_gstate_t *a) {
+    return lfs_tag_type1(a->tag);
+}
+```
+
+如果a的tag的`type1`字段非空，即认为发生了移动。虽说全局状态确实只有正在移动和没有正在移动这两种状态吧，但是感觉还是应该校验一下是不是`0x7ff`更合适。
+
+---
+
+### `lfs_gstate_needssuperblock`
+
+```c
+static inline bool lfs_gstate_needssuperblock(const lfs_gstate_t *a) {
+    return lfs_tag_size(a->tag) >> 9;
+}
+```
+
+检验是否需要超级快，即倒数第10位。
+
+---
+
+### `lfs_gstate_hasmovehere`
+
+```c
+static inline bool lfs_gstate_hasmovehere(const lfs_gstate_t *a,
+        const lfs_block_t *pair) {
+    return lfs_tag_type1(a->tag) && lfs_pair_cmp(a->pair, pair) == 0;
+}
+```
+
+首先查看是否在移动中，其次看记录的块对是不是已经不一样了，如果都是，就认为（断电前）已经发生了移动。
+
+---
+
+### `lfs_gstate_fromle32`
+
+```c
+static inline void lfs_gstate_fromle32(lfs_gstate_t *a) {
+    a->tag     = lfs_fromle32(a->tag);
+    a->pair[0] = lfs_fromle32(a->pair[0]);
+    a->pair[1] = lfs_fromle32(a->pair[1]);
+}
+```
+
+将小端序全局状态转化为大端序（仅在大端序的机器上）。
+
+---
+
+### `lfs_gstate_tole32`
+
+```c
+static inline void lfs_gstate_tole32(lfs_gstate_t *a) {
+    a->tag     = lfs_tole32(a->tag);
+    a->pair[0] = lfs_tole32(a->pair[0]);
+    a->pair[1] = lfs_tole32(a->pair[1]);
+}
+```
+
+将大端序全局状态转化为小端序。
+
+---
+
+### `lfs_fcrc_fromle32`
+
+```c
+static void lfs_fcrc_fromle32(struct lfs_fcrc *fcrc) {
+    fcrc->size = lfs_fromle32(fcrc->size);
+    fcrc->crc = lfs_fromle32(fcrc->crc);
+}
+```
+
+将小端序FCRC转化为大端序（仅在大端序的机器上）。
+
+---
+
+### `lfs_fcrc_tole32`
+
+```c
+static void lfs_fcrc_tole32(struct lfs_fcrc *fcrc) {
+    fcrc->size = lfs_tole32(fcrc->size);
+    fcrc->crc = lfs_tole32(fcrc->crc);
+}
+```
+
+将大端序FCRC转化为小端序
+
+---
+
+### `lfs_ctz_fromle32`
+
+```c
+static void lfs_ctz_fromle32(struct lfs_ctz *ctz) {
+    ctz->head = lfs_fromle32(ctz->head);
+    ctz->size = lfs_fromle32(ctz->size);
+}
+```
+
+将小端序CTZ转化为大端序（仅在大端序的机器上）。
+
+---
+
+### `lfs_ctz_tole32`
+
+```c
+static void lfs_ctz_tole32(struct lfs_ctz *ctz) {
+    ctz->head = lfs_tole32(ctz->head);
+    ctz->size = lfs_tole32(ctz->size);
+}
+```
+
+将大端序CTZ转化为小端序
+
+
+
+---
+
+### `lfs_superblock_fromle32`
+
+```c
+static inline void lfs_superblock_fromle32(lfs_superblock_t *superblock) {
+    superblock->version     = lfs_fromle32(superblock->version);
+    superblock->block_size  = lfs_fromle32(superblock->block_size);
+    superblock->block_count = lfs_fromle32(superblock->block_count);
+    superblock->name_max    = lfs_fromle32(superblock->name_max);
+    superblock->file_max    = lfs_fromle32(superblock->file_max);
+    superblock->attr_max    = lfs_fromle32(superblock->attr_max);
+}
+
+```
+
+将小端序超级块转化为大端序（仅在大端序的机器上）。
+
+---
+
+### `lfs_superblock_tole32`
+
+```c
+static inline void lfs_superblock_tole32(lfs_superblock_t *superblock) {
+    superblock->version     = lfs_tole32(superblock->version);
+    superblock->block_size  = lfs_tole32(superblock->block_size);
+    superblock->block_count = lfs_tole32(superblock->block_count);
+    superblock->name_max    = lfs_tole32(superblock->name_max);
+    superblock->file_max    = lfs_tole32(superblock->file_max);
+    superblock->attr_max    = lfs_tole32(superblock->attr_max);
+}
+```
+
+将大端序超级块转化为小端序
+
+---
+
+### `lfs_mlist_isopen`
+
+```c
+static bool lfs_mlist_isopen(struct lfs_mlist *head,
+        struct lfs_mlist *node) {
+    for (struct lfs_mlist **p = &head; *p; p = &(*p)->next) {
+        if (*p == (struct lfs_mlist*)node) {
+            return true;
+        }
+    }
+
+    return false;
+}
+```
+
+给定一个`lfs_mlist`(的头)和一个节点，遍历改列表，如目标节点在列表中，返回`true`，否则返回`false`
+
+---
+
+### `lfs_mlist_remove`
+
+```c
+static void lfs_mlist_remove(lfs_t *lfs, struct lfs_mlist *mlist) {
+    for (struct lfs_mlist **p = &lfs->mlist; *p; p = &(*p)->next) {
+        if (*p == mlist) {
+            *p = (*p)->next;
+            break;
+        }
+    }
+}
+```
+
+从给定的`lfs`的`mlist`中查找并删除一个给定的节点
+
+---
+
+### `lfs_mlist_append`
+
+```c
+static void lfs_mlist_append(lfs_t *lfs, struct lfs_mlist *mlist) {
+    mlist->next = lfs->mlist;
+    lfs->mlist = mlist;
+}
+```
+
+将一个节点插入`lfs`的`mlist`并作为头
+
+---
+
+### `lfs_fs_disk_version`
+
+```c
+static uint32_t lfs_fs_disk_version(lfs_t *lfs) {
+    (void)lfs;
+#ifdef LFS_MULTIVERSION
+    if (lfs->cfg->disk_version) {
+        return lfs->cfg->disk_version;
+    } else
+#endif
+    {
+        return LFS_DISK_VERSION;
+    }
+}
+```
+
+返回磁盘版本，若指定则返回指定值，否则返回最新版本。
+
+---
+
+### ` lfs_fs_disk_version_major`
+
+```c
+static uint16_t lfs_fs_disk_version_major(lfs_t *lfs) {
+    return 0xffff & (lfs_fs_disk_version(lfs) >> 16);
+
+}
+```
+
+返回磁盘大版本
+
+---
+
+### `lfs_fs_disk_version_minor`
+
+```c
+static uint16_t lfs_fs_disk_version_minor(lfs_t *lfs) {
+    return 0xffff & (lfs_fs_disk_version(lfs) >> 0);
+}
+```
+
+返回磁盘小版本
+
+---
+
+### `lfs_alloc_ckpoint`
+
+```c
+static void lfs_alloc_ckpoint(lfs_t *lfs) {
+    lfs->lookahead.ckpoint = lfs->block_count;
+}c
+```
+
+重置`checkpoint`到总块数，表示可以重新开始扫描所有块。
+
+---
+
+### `lfs_alloc_drop`
+
+```c
+static void lfs_alloc_drop(lfs_t *lfs) {
+    lfs->lookahead.size = 0;
+    lfs->lookahead.next = 0;
+    lfs_alloc_ckpoint(lfs);
+}
+```
+
+重置前瞻缓冲区，用于挂载和遍历失败时
+
+---
+
+### `lfs_alloc_lookahead`
+
+```c
+static int lfs_alloc_lookahead(void *p, lfs_block_t block) {
+    lfs_t *lfs = (lfs_t*)p;
+    lfs_block_t off = ((block - lfs->lookahead.start)
+            + lfs->block_count) % lfs->block_count;
+
+    if (off < lfs->lookahead.size) {
+        lfs->lookahead.buffer[off / 8] |= 1U << (off % 8);
+    }
+
+    return 0;
+}
+```
+
+把给定的块在前瞻缓冲区的位图中进行标记，当前瞻缓冲区的大小超过剩余块时，块起始的部分也将被包括。函数声明中没有直接使用`lfs`的指针是为了使函数可以被作为回调函数使用。
+
+---
+
+### `lfs_alloc_scan`
+
+```c
+static int lfs_alloc_scan(lfs_t *lfs) {
+    // move lookahead buffer to the first unused block
+    //
+    // note we limit the lookahead buffer to at most the amount of blocks
+    // checkpointed, this prevents the math in lfs_alloc from underflowing
+    lfs->lookahead.start = (lfs->lookahead.start + lfs->lookahead.next) 
+            % lfs->block_count;
+    lfs->lookahead.next = 0;
+    lfs->lookahead.size = lfs_min(
+            8*lfs->cfg->lookahead_size,
+            lfs->lookahead.ckpoint);
+
+    // find mask of free blocks from tree
+    memset(lfs->lookahead.buffer, 0, lfs->cfg->lookahead_size);
+    int err = lfs_fs_traverse_(lfs, lfs_alloc_lookahead, lfs, true);
+    if (err) {
+        lfs_alloc_drop(lfs);
+        return err;
+    }
+
+    return 0;
+}
+```
+
+将前瞻缓冲区移动到首个未使用的块，从这里可以看出之前对`lookahead.next`字段的认识有误，**next 并不是“下一个空闲块”的直观位置**，而是当前扫描窗口中的索引，随着扫描逐步增加。除此之外，该块还把缓冲区全部设置为0，并将`lfs_alloc_lookahead`作为回调函数传入遍历函数，使得缓冲区中已经被使用过的块继续被设置为1。
+
+---
+
+### `lfs_alloc`
+
+```c
+static int lfs_alloc(lfs_t *lfs, lfs_block_t *block) {
+    while (true) {
+        // scan our lookahead buffer for free blocks
+        while (lfs->lookahead.next < lfs->lookahead.size) {
+            if (!(lfs->lookahead.buffer[lfs->lookahead.next / 8]
+                    & (1U << (lfs->lookahead.next % 8)))) {
+                // found a free block
+                *block = (lfs->lookahead.start + lfs->lookahead.next)
+                        % lfs->block_count;
+
+                // eagerly find next free block to maximize how many blocks
+                // lfs_alloc_ckpoint makes available for scanning
+                while (true) {
+                    lfs->lookahead.next += 1;
+                    lfs->lookahead.ckpoint -= 1;
+
+                    if (lfs->lookahead.next >= lfs->lookahead.size
+                            || !(lfs->lookahead.buffer[lfs->lookahead.next / 8]
+                                & (1U << (lfs->lookahead.next % 8)))) {
+                        return 0;
+                    }
+                }
+            }
+
+            lfs->lookahead.next += 1;
+            lfs->lookahead.ckpoint -= 1;
+        }
+
+        // In order to keep our block allocator from spinning forever when our
+        // filesystem is full, we mark points where there are no in-flight
+        // allocations with a checkpoint before starting a set of allocations.
+        //
+        // If we've looked at all blocks since the last checkpoint, we report
+        // the filesystem as out of storage.
+        //
+        if (lfs->lookahead.ckpoint <= 0) {
+            LFS_ERROR("No more free space 0x%"PRIx32,
+                    (lfs->lookahead.start + lfs->lookahead.next)
+                        % lfs->block_count);
+            return LFS_ERR_NOSPC;
+        }
+
+        // No blocks in our lookahead buffer, we need to scan the filesystem for
+        // unused blocks in the next lookahead window.
+        int err = lfs_alloc_scan(lfs);
+        if(err) {
+            return err;
+        }
+    }
+}
+```
+
+从文件系统中寻找并分配一个空闲块。首先在位图中查看当前索引位置（`next`标记的地方）是否是空闲块。如找不到，就逐个增加`next`，看下一个块，并逐个减少`checkpoint`(所以它的用处是标记一共还有多少块？似乎是的，毕竟开始的时候就标记为块总数)。如果找到，则提供给传入的`block`以此时的块号，然后将next一直增加到下一个空闲快的位置。
