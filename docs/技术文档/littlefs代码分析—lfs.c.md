@@ -277,9 +277,9 @@ struct lfs_fs_parent_match {
 * `lfs`:文件系统实例指针
 * `paire`:要查找其父块的目标块
 
-## 函数
+## 块设备与缓存
 
-激动人心的时刻正式开始！到这里为止，前面的技术文档总计约六千多词，这一段可能就要两万词以上，一百多个函数，开始吧！
+激动人心的时刻正式开始！到这里为止，我们将正式开始对`littlefs`的核心实现进行分析，将近200个函数，就从这里开始吧！
 
 ### `lfs_cache_drop`
 
@@ -636,7 +636,9 @@ static int lfs_bd_erase(lfs_t *lfs, lfs_block_t block) {
 
 这位更是ez，那么到此为止，所有的快函数操作函数就都看完了。总结一下，这些函数非平凡的部分其实就是在`lfs->cfg`接受的外部块设备函数的基础上，增加了读、写两个缓存块和有关的操作。
 
----
+
+
+## 工具函数
 
 ### `lfs_size_t`
 
@@ -1178,7 +1180,9 @@ static uint16_t lfs_fs_disk_version_minor(lfs_t *lfs) {
 
 返回磁盘小版本
 
----
+
+
+## 块分配器
 
 ### `lfs_alloc_ckpoint`
 
@@ -1312,4 +1316,373 @@ static int lfs_alloc(lfs_t *lfs, lfs_block_t *block) {
 }
 ```
 
-从文件系统中寻找并分配一个空闲块。首先在位图中查看当前索引位置（`next`标记的地方）是否是空闲块。如找不到，就逐个增加`next`，看下一个块，并逐个减少`checkpoint`(所以它的用处是标记一共还有多少块？似乎是的，毕竟开始的时候就标记为块总数)。如果找到，则提供给传入的`block`以此时的块号，然后将next一直增加到下一个空闲快的位置。
+从文件系统中寻找并分配一个空闲块。首先在位图中查看当前索引位置（`next`标记的地方）是否是空闲块。如找不到，就逐个增加`next`，看下一个块，并逐个减少`checkpoint`(所以它的用处是标记一共还有多少块？似乎是的，毕竟开始的时候就标记为块总数)。如果找到，则提供给传入的`block`以此时的块号，然后将next一直增加到下一个空闲快的位置。至此，我们基于前瞻缓冲区实现了一个块分配器。
+
+## 目录与元数据对操作
+
+### `lfs_dir_getslice`
+
+```c
+static lfs_stag_t lfs_dir_getslice(lfs_t *lfs, const lfs_mdir_t *dir,
+        lfs_tag_t gmask, lfs_tag_t gtag,
+        lfs_off_t goff, void *gbuffer, lfs_size_t gsize) {
+    lfs_off_t off = dir->off;
+    lfs_tag_t ntag = dir->etag;
+    lfs_stag_t gdiff = 0;
+
+    // synthetic moves
+    if (lfs_gstate_hasmovehere(&lfs->gdisk, dir->pair) &&
+            lfs_tag_id(gmask) != 0) {
+        if (lfs_tag_id(lfs->gdisk.tag) == lfs_tag_id(gtag)) {
+            return LFS_ERR_NOENT;
+        } else if (lfs_tag_id(lfs->gdisk.tag) < lfs_tag_id(gtag)) {
+            gdiff -= LFS_MKTAG(0, 1, 0);
+        }
+    }
+
+    // iterate over dir block backwards (for faster lookups)
+    while (off >= sizeof(lfs_tag_t) + lfs_tag_dsize(ntag)) {
+        off -= lfs_tag_dsize(ntag);
+        lfs_tag_t tag = ntag;
+        int err = lfs_bd_read(lfs,
+                NULL, &lfs->rcache, sizeof(ntag),
+                dir->pair[0], off, &ntag, sizeof(ntag));
+        if (err) {
+            return err;
+        }
+
+        ntag = (lfs_frombe32(ntag) ^ tag) & 0x7fffffff;
+
+        if (lfs_tag_id(gmask) != 0 &&
+                lfs_tag_type1(tag) == LFS_TYPE_SPLICE &&
+                lfs_tag_id(tag) <= lfs_tag_id(gtag - gdiff)) {
+            if (tag == (LFS_MKTAG(LFS_TYPE_CREATE, 0, 0) |
+                    (LFS_MKTAG(0, 0x3ff, 0) & (gtag - gdiff)))) {
+                // found where we were created
+                return LFS_ERR_NOENT;
+            }
+
+            // move around splices
+            gdiff += LFS_MKTAG(0, lfs_tag_splice(tag), 0);
+        }
+
+        if ((gmask & tag) == (gmask & (gtag - gdiff))) {
+            if (lfs_tag_isdelete(tag)) {
+                return LFS_ERR_NOENT;
+            }
+
+            lfs_size_t diff = lfs_min(lfs_tag_size(tag), gsize);
+            err = lfs_bd_read(lfs,
+                    NULL, &lfs->rcache, diff,
+                    dir->pair[0], off+sizeof(tag)+goff, gbuffer, diff);
+            if (err) {
+                return err;
+            }
+
+            memset((uint8_t*)gbuffer + diff, 0, gsize - diff);
+
+            return tag + gdiff;
+        }
+    }
+
+    return LFS_ERR_NOENT;
+}
+```
+
+从目录中读取匹配给定条件的数据切片，函数参数：
+`lfs_t *lfs`：文件系统实例
+`const lfs_mdir_t *dir` ：目录元数据
+`lfs_tag_t gmask`：标签掩码，用于匹配
+`lfs_tag_t gtag`：目标标签
+`lfs_off_t goff` ：数据偏移量
+`void *gbuffer` ：输出缓冲区
+`lfs_size_t gsize`：要读取的大小
+
+这里呢实际上是允许从匹配的tag中读取任意大小的数据的底层函数，可以被封装到`lfs_dir_get`和`lfs_dir_getread`等上层函数。开始的时候检验有没有发生移动，如果有并且移动后`tag`和给定的相同，就认为已经被移动了并返回条目缺失的错误，如果发生了移动，但是`gtag`所给的`id`更大，就把`gdiff`的`id`-1,。接下来进行向前检查，每次都将`off`减去一个当前条目的大小，然后从块中读取一个新标签（实际上是和当前标签的异或，再异或一次得到原标签），然后开始处理旧的标签，如果标签掩码不为0，且现有标签id小于等于 `(gtag - gdiff)` 的 id（即目标标签减去已累积的 splice 偏移），就把diff加上此标签id，同时若tag是创建文件标签，`id=gtag - gdiff`，也返回条目缺失。最后检查是否满足`(*gmask* & tag) == (*gmask* & (*gtag* - gdiff))`，若是且标签不是删除的，取当前标签记录中数据部分的大小`（lfs_tag_size(tag)）`与请求大小 `gsize` 的最小值，在当前目录块和当前偏移量加上指定偏移量处读此大小的数据到`gbuffer`上，然后若不能填满则把剩下的东西填充为0。最后返回值为匹配的标签加上`gdiff`。
+
+这段函数是头一个看的云里雾里的，真没看懂在干嘛。当然写了这么一串东西，大概干什么还是知道的。阻止完全理解的部分主要在于`gdiff`对`id`的操作，我之前以为`id`只是一个标识符，只要唯一即可，但是现在看来还有偏序关系甚至数量关系，阅读之后对于`id`操作的代码之后需要回来补充这里（//TODO）。
+
+---
+
+### `lfs_dir_get`
+
+```c
+static lfs_stag_t lfs_dir_get(lfs_t *lfs, const lfs_mdir_t *dir,
+        lfs_tag_t gmask, lfs_tag_t gtag, void *buffer) {
+    return lfs_dir_getslice(lfs, dir,
+            gmask, gtag,
+            0, buffer, lfs_tag_size(gtag));
+}
+```
+
+那么这段代码就很简单了吗，直接调用`lfs_dir_getslice`去读一个匹配tag的内容。
+
+---
+
+### `lfs_dir_getread`
+
+```c
+static int lfs_dir_getread(lfs_t *lfs, const lfs_mdir_t *dir,
+        const lfs_cache_t *pcache, lfs_cache_t *rcache, lfs_size_t hint,
+        lfs_tag_t gmask, lfs_tag_t gtag,
+        lfs_off_t off, void *buffer, lfs_size_t size) {
+    uint8_t *data = buffer;
+    if (off+size > lfs->cfg->block_size) {
+        return LFS_ERR_CORRUPT;
+    }
+
+    while (size > 0) {
+        lfs_size_t diff = size;
+
+        if (pcache && pcache->block == LFS_BLOCK_INLINE &&
+                off < pcache->off + pcache->size) {
+            if (off >= pcache->off) {
+                // is already in pcache?
+                diff = lfs_min(diff, pcache->size - (off-pcache->off));
+                memcpy(data, &pcache->buffer[off-pcache->off], diff);
+
+                data += diff;
+                off += diff;
+                size -= diff;
+                continue;
+            }
+
+            // pcache takes priority
+            diff = lfs_min(diff, pcache->off-off);
+        }
+
+        if (rcache->block == LFS_BLOCK_INLINE &&
+                off < rcache->off + rcache->size) {
+            if (off >= rcache->off) {
+                // is already in rcache?
+                diff = lfs_min(diff, rcache->size - (off-rcache->off));
+                memcpy(data, &rcache->buffer[off-rcache->off], diff);
+
+                data += diff;
+                off += diff;
+                size -= diff;
+                continue;
+            }
+
+            // rcache takes priority
+            diff = lfs_min(diff, rcache->off-off);
+        }
+
+        // load to cache, first condition can no longer fail
+        rcache->block = LFS_BLOCK_INLINE;
+        rcache->off = lfs_aligndown(off, lfs->cfg->read_size);
+        rcache->size = lfs_min(lfs_alignup(off+hint, lfs->cfg->read_size),
+                lfs->cfg->cache_size);
+        int err = lfs_dir_getslice(lfs, dir, gmask, gtag,
+                rcache->off, rcache->buffer, rcache->size);
+        if (err < 0) {
+            return err;
+        }
+    }
+
+    return 0;
+}
+```
+
+这里和`lfs_bd_read`的处理逻辑几乎完全一致，除了块号检验变为了检验是否为`LFS_BLOCK_INLINE`。就是套了一层缓存的`lfs_dir_getslice`。
+
+---
+
+### ` lfs_dir_traverse`
+
+```c
+static int lfs_dir_traverse(lfs_t *lfs,
+        const lfs_mdir_t *dir, lfs_off_t off, lfs_tag_t ptag,
+        const struct lfs_mattr *attrs, int attrcount,
+        lfs_tag_t tmask, lfs_tag_t ttag,
+        uint16_t begin, uint16_t end, int16_t diff,
+        int (*cb)(void *data, lfs_tag_t tag, const void *buffer), void *data) {
+    // This function in inherently recursive, but bounded. To allow tool-based
+    // analysis without unnecessary code-cost we use an explicit stack
+    struct lfs_dir_traverse stack[LFS_DIR_TRAVERSE_DEPTH-1];
+    unsigned sp = 0;
+    int res;
+
+    // iterate over directory and attrs
+    lfs_tag_t tag;
+    const void *buffer;
+    struct lfs_diskoff disk = {0};
+    while (true) {
+        {
+            if (off+lfs_tag_dsize(ptag) < dir->off) {
+                off += lfs_tag_dsize(ptag);
+                int err = lfs_bd_read(lfs,
+                        NULL, &lfs->rcache, sizeof(tag),
+                        dir->pair[0], off, &tag, sizeof(tag));
+                if (err) {
+                    return err;
+                }
+
+                tag = (lfs_frombe32(tag) ^ ptag) | 0x80000000;
+                disk.block = dir->pair[0];
+                disk.off = off+sizeof(lfs_tag_t);
+                buffer = &disk;
+                ptag = tag;
+            } else if (attrcount > 0) {
+                tag = attrs[0].tag;
+                buffer = attrs[0].buffer;
+                attrs += 1;
+                attrcount -= 1;
+            } else {
+                // finished traversal, pop from stack?
+                res = 0;
+                break;
+            }
+
+            // do we need to filter?
+            lfs_tag_t mask = LFS_MKTAG(0x7ff, 0, 0);
+            if ((mask & tmask & tag) != (mask & tmask & ttag)) {
+                continue;
+            }
+
+            if (lfs_tag_id(tmask) != 0) {
+                LFS_ASSERT(sp < LFS_DIR_TRAVERSE_DEPTH);
+                // recurse, scan for duplicates, and update tag based on
+                // creates/deletes
+                stack[sp] = (struct lfs_dir_traverse){
+                    .dir        = dir,
+                    .off        = off,
+                    .ptag       = ptag,
+                    .attrs      = attrs,
+                    .attrcount  = attrcount,
+                    .tmask      = tmask,
+                    .ttag       = ttag,
+                    .begin      = begin,
+                    .end        = end,
+                    .diff       = diff,
+                    .cb         = cb,
+                    .data       = data,
+                    .tag        = tag,
+                    .buffer     = buffer,
+                    .disk       = disk,
+                };
+                sp += 1;
+
+                tmask = 0;
+                ttag = 0;
+                begin = 0;
+                end = 0;
+                diff = 0;
+                cb = lfs_dir_traverse_filter;
+                data = &stack[sp-1].tag;
+                continue;
+            }
+        }
+
+popped:
+        // in filter range?
+        if (lfs_tag_id(tmask) != 0 &&
+                !(lfs_tag_id(tag) >= begin && lfs_tag_id(tag) < end)) {
+            continue;
+        }
+
+        // handle special cases for mcu-side operations
+        if (lfs_tag_type3(tag) == LFS_FROM_NOOP) {
+            // do nothing
+        } else if (lfs_tag_type3(tag) == LFS_FROM_MOVE) {
+            // Without this condition, lfs_dir_traverse can exhibit an
+            // extremely expensive O(n^3) of nested loops when renaming.
+            // This happens because lfs_dir_traverse tries to filter tags by
+            // the tags in the source directory, triggering a second
+            // lfs_dir_traverse with its own filter operation.
+            //
+            // traverse with commit
+            // '-> traverse with filter
+            //     '-> traverse with move
+            //         '-> traverse with filter
+            //
+            // However we don't actually care about filtering the second set of
+            // tags, since duplicate tags have no effect when filtering.
+            //
+            // This check skips this unnecessary recursive filtering explicitly,
+            // reducing this runtime from O(n^3) to O(n^2).
+            if (cb == lfs_dir_traverse_filter) {
+                continue;
+            }
+
+            // recurse into move
+            stack[sp] = (struct lfs_dir_traverse){
+                .dir        = dir,
+                .off        = off,
+                .ptag       = ptag,
+                .attrs      = attrs,
+                .attrcount  = attrcount,
+                .tmask      = tmask,
+                .ttag       = ttag,
+                .begin      = begin,
+                .end        = end,
+                .diff       = diff,
+                .cb         = cb,
+                .data       = data,
+                .tag        = LFS_MKTAG(LFS_FROM_NOOP, 0, 0),
+            };
+            sp += 1;
+
+            uint16_t fromid = lfs_tag_size(tag);
+            uint16_t toid = lfs_tag_id(tag);
+            dir = buffer;
+            off = 0;
+            ptag = 0xffffffff;
+            attrs = NULL;
+            attrcount = 0;
+            tmask = LFS_MKTAG(0x600, 0x3ff, 0);
+            ttag = LFS_MKTAG(LFS_TYPE_STRUCT, 0, 0);
+            begin = fromid;
+            end = fromid+1;
+            diff = toid-fromid+diff;
+        } else if (lfs_tag_type3(tag) == LFS_FROM_USERATTRS) {
+            for (unsigned i = 0; i < lfs_tag_size(tag); i++) {
+                const struct lfs_attr *a = buffer;
+                res = cb(data, LFS_MKTAG(LFS_TYPE_USERATTR + a[i].type,
+                        lfs_tag_id(tag) + diff, a[i].size), a[i].buffer);
+                if (res < 0) {
+                    return res;
+                }
+
+                if (res) {
+                    break;
+                }
+            }
+        } else {
+            res = cb(data, tag + LFS_MKTAG(0, diff, 0), buffer);
+            if (res < 0) {
+                return res;
+            }
+
+            if (res) {
+                break;
+            }
+        }
+    }
+
+    if (sp > 0) {
+        // pop from the stack and return, fortunately all pops share
+        // a destination
+        dir         = stack[sp-1].dir;
+        off         = stack[sp-1].off;
+        ptag        = stack[sp-1].ptag;
+        attrs       = stack[sp-1].attrs;
+        attrcount   = stack[sp-1].attrcount;
+        tmask       = stack[sp-1].tmask;
+        ttag        = stack[sp-1].ttag;
+        begin       = stack[sp-1].begin;
+        end         = stack[sp-1].end;
+        diff        = stack[sp-1].diff;
+        cb          = stack[sp-1].cb;
+        data        = stack[sp-1].data;
+        tag         = stack[sp-1].tag;
+        buffer      = stack[sp-1].buffer;
+        disk        = stack[sp-1].disk;
+        sp -= 1;
+        goto popped;
+    } else {
+        return res;
+    }
+}
+```
+

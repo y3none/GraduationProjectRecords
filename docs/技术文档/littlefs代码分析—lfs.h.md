@@ -448,7 +448,7 @@ struct lfs_mdir {
 * `lfs_block_t pair[2]`:存储元数据对所在的2个块的位置
 * `rev`：*revision*，用于区分块的版本，选择最新的版本作为有效块
 * `off`: 目录块中当前的写入偏移量
-* `etag`:目录项的entry tag
+* `etag`:目录项的entry tag，从后续函数看来，这里特指最后写入的标签
 * `count`:有效条目的数量
 * `erased`:标识当前目录块是否已被擦除，确保写操作的安全性
 * `split`:标识当前目录是否发生了分裂
