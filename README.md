@@ -5,4 +5,4 @@
 
 本文档主要包括毕业设计完成期间的日报、周报和组件化os的研发日志。
 
-[毕业论文](./docs/技术文档/thuthesis-yyy.pdf)
+[毕业论文](https://github.com/y3none/thuthesis-bachelor/blob/master/thuthesis-yyy.pdf)
